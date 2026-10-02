@@ -24,8 +24,9 @@
       <div class="nav-active"><span aria-hidden="true">&nearr;</span> Query studio <span class="nav-dot"></span></div>
       <button id="inspect-db" class="nav-button" type="button"><span aria-hidden="true">&nearr;</span> Database explorer <span aria-hidden="true">&nearr;</span></button>
       <section class="sidebar-section database-section">
-        <div class="section-heading"><h2>Data source</h2><span class="tiny-label">SQLITE</span></div>
-        <label class="sr-only" for="database">Database working copy</label><div class="database-picker"><select id="database" aria-label="Database working copy" autocomplete="off"></select><button id="delete-db" class="icon-button delete-db" type="button" aria-label="Delete imported database" title="Delete imported database" hidden>&times;</button></div>
+        <div class="section-heading"><h2>Data source</h2><span class="tiny-label" id="backend-label">SQLITE</span></div>
+        <label class="sr-only" for="backend">Query backend</label><div class="database-picker"><select id="backend" aria-label="Query backend" autocomplete="off"><option value="sqlite">SQLite</option><option value="neo4j">Neo4j (prototype)</option></select></div>
+        <label class="sr-only" for="database">Database working copy</label><div class="database-picker" id="sqlite-picker"><select id="database" aria-label="Database working copy" autocomplete="off"></select><button id="delete-db" class="icon-button delete-db" type="button" aria-label="Delete imported database" title="Delete imported database" hidden>&times;</button></div>
         <p class="source-caption" id="source-caption">Loading local databases&hellip;</p>
       </section>
       <section class="sidebar-section schema-section">
@@ -93,6 +94,12 @@
 <label for="model">Model identifier</label><input id="model" type="text" autocomplete="off" spellcheck="false">
 <label for="api-key">API key &middot; leave blank to keep saved key</label><input id="api-key" type="password" autocomplete="new-password" placeholder="Stored only in your local workspace">
 <p id="key-status" class="field-help">Laya / custom may omit the model and key.</p><button id="save-connection" type="button" class="button primary">Save connection</button><p id="settings-feedback" role="status"></p>
+</div></details><details id="neo4j-details"><summary>Neo4j connection (Cypher prototype)</summary><div class="settings-fields">
+<label for="neo4j-uri">Neo4j URI</label><input id="neo4j-uri" type="text" autocomplete="off" spellcheck="false" placeholder="bolt://localhost:7687 · or .env">
+<label for="neo4j-user">Username</label><input id="neo4j-user" type="text" autocomplete="off" spellcheck="false" placeholder="or .env">
+<label for="neo4j-password">Password</label><input id="neo4j-password" type="password" autocomplete="new-password" placeholder="or .env">
+<label for="neo4j-database">Database</label><input id="neo4j-database" type="text" autocomplete="off" spellcheck="false" placeholder="or .env">
+<p class="field-help">Stored in this browser only, sent with each request; blank fields fall back to the server's .env.</p><button id="save-neo4j" type="button" class="button primary">Save Neo4j settings</button><p id="neo4j-feedback" role="status"></p>
 </div></details></dialog>
   <dialog id="path-dialog"><form method="dialog"><h2>Open a local SQLite database</h2><p>IntentSQL imports a working copy into its local workspace.</p><label for="db-path">Absolute file path</label><input id="db-path" placeholder="C:\Data\example.db or /path/to/example.db" spellcheck="false"><div class="dialog-actions"><button value="cancel" class="button secondary">Cancel</button><button id="import-confirm" value="import" class="button primary">Import copy</button></div></form></dialog>
   <dialog id="delete-db-dialog"><form method="dialog"><h2>Delete imported database?</h2><p id="delete-db-summary">This removes the local working copy. The original file you imported is not changed.</p><div class="dialog-actions"><button value="cancel" class="button secondary">Cancel</button><button id="delete-db-confirm" value="delete" class="button danger">Delete working copy</button></div></form></dialog>

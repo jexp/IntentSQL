@@ -577,3 +577,139 @@ def undo(body: UndoInput) -> dict[str, Any]:
         item["backup"].unlink(missing_ok=True)
         UNDO.pop(body.token, None)
         return {"restored": True, "schema": schema(item["database"])}
+
+
+# --- IntentCypher: Neo4j read prototype -------------------------------------
+# Translates the IntentCypher answer into the same terminal result shape the
+# query-studio UI renders for SQLite reads. Neo4j connection details come from
+# the request (browser-stored) or fall back to .env / process environment.
+
+
+class CypherConnectionInput(BaseModel):
+    uri: str = ""
+    username: str = ""
+    password: str = ""
+    database: str = ""
+
+
+class CypherAskInput(CypherConnectionInput):
+    question: str = Field(min_length=3, max_length=2000)
+
+
+def _cypher_config(body: CypherConnectionInput):
+    from intentcypher.connection import apply_env_file, connection_config
+    apply_env_file()
+    return connection_config(
+        env={}, uri=body.uri or None, username=body.username or None,
+        password=body.password or None, database=body.database or None)
+
+
+@app.get("/api/neo4j/status")
+def neo4j_status() -> dict[str, Any]:
+    """Report whether a Neo4j connection can be resolved. Never returns secrets."""
+    try:
+        config = _cypher_config(CypherConnectionInput())
+    except Exception:
+        return {"configured": False}
+    return {"configured": True, "uri": config.uri, "database": config.database}
+
+
+@app.post("/api/neo4j/schema")
+def neo4j_schema(body: CypherConnectionInput) -> dict[str, Any]:
+    from intentcypher.connection import connect_readonly
+    from intentcypher.graph_schema import load_schema
+    try:
+        config = _cypher_config(body)
+    except Exception as exc:
+        raise HTTPException(400, str(exc)) from exc
+    with RUN_LOCK:
+        try:
+            driver = connect_readonly(config)
+        except Exception as exc:
+            raise HTTPException(400, f"Could not reach Neo4j: {exc}") from exc
+        try:
+            graph = load_schema(driver, config.database)
+        except Exception as exc:
+            raise HTTPException(400, f"Schema inspection failed: {exc}") from exc
+        finally:
+            driver.close()
+    return {
+        "labels": [{"name": label,
+                    "properties": [{"name": prop.name, "types": list(prop.types),
+                                    "mandatory": prop.mandatory}
+                                   for prop in graph.properties_for(label)]}
+                   for label in graph.label_names],
+        "relationships": [{"type": rel.rel_type, "from": rel.start_label,
+                           "to": rel.end_label, "count": rel.count}
+                          for rel in graph],
+    }
+
+
+def _cypher_display(query: str, parameters: dict[str, Any]) -> tuple[str, list[Any]]:
+    """Translate $name parameters into the UI's positional '?' display form."""
+    order: list[str] = []
+    display = re.sub(r"\$[A-Za-z_][A-Za-z0-9_]*",
+                     lambda match: (order.append(match.group(0)[1:]) or "?"), query)
+    return display, [parameters[name] for name in order]
+
+
+@app.post("/api/cypher")
+def ask_cypher(body: CypherAskInput) -> dict[str, Any]:
+    from intentcypher.semantic_cypher import run_read as run_cypher_read
+    try:
+        config = _cypher_config(body)
+    except Exception as exc:
+        raise HTTPException(400, str(exc)) from exc
+    with RUN_LOCK:
+        try:
+            answer = run_cypher_read(body.question.strip(), config, JevClient())
+        except Exception as exc:
+            raise HTTPException(400, str(exc)) from exc
+    rows = answer.rows
+    columns = list(rows[0]) if rows else []
+    # Whole-node returns carry nested maps; the results table shows scalars.
+    tabular = [[json.dumps(value, default=str, ensure_ascii=False)
+                if isinstance(value, (dict, list)) else value
+                for value in row.values()] for row in rows]
+    display_sql, display_params = _cypher_display(answer.query, answer.parameters) \
+        if answer.query else ("", [])
+    plan = answer.plan or {}
+    relationship = plan.get("relationship")
+    outputs = plan.get("output")
+    program = {
+        "operation": "SELECT",
+        "base_table": plan.get("source_label"),
+        "joins": ([f"{relationship['type']} → {relationship['other_label']}"]
+                  if relationship else []),
+        "outputs": ["whole nodes"] if outputs == "whole nodes"
+                   else list(outputs or []),
+        "related_outputs": plan.get("related_output") or [],
+        "filters": [f"{item['property']} {item['operator']}"
+                    + ("" if item.get("value") is None else f" {json.dumps(item['value'], default=str)}")
+                    for item in plan.get("filters") or []],
+        "filter_connector": "AND",
+        "order_by": [{"key": item["property"], "direction": item["direction"]}
+                     for item in plan.get("ordering") or []],
+        "limit": plan.get("limit"),
+        "distinct": "UNSET",
+        "language": "cypher",
+    }
+    return json_safe({
+        "status": answer.status,
+        "reason": answer.reason,
+        "supported": answer.status == "answered",
+        "columns": columns,
+        "rows": tabular,
+        "total_rows": len(rows),
+        "truncated": False,
+        "program": program,
+        "sql": display_sql,
+        "params": display_params,
+        "cypher": answer.query,
+        "parameters": answer.parameters,
+        "stats": {"jev_calls": answer.jev_calls,
+                  "input_tokens": answer.input_tokens,
+                  "output_tokens": answer.output_tokens,
+                  "usage_complete": True},
+        "trace": answer.trace,
+    })

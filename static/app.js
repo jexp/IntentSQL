@@ -154,6 +154,88 @@ async function loadSchema() {
     button.addEventListener("click", () => openInspector(button.dataset.table));
   }
 }
+// --- Neo4j / IntentCypher prototype ---------------------------------------
+function currentBackend() { return $("#backend")?.value || "sqlite"; }
+function neo4jSettings() {
+  const fields = {};
+  for (const [key, id] of [["uri","#neo4j-uri"],["username","#neo4j-user"],["password","#neo4j-password"],["database","#neo4j-database"]]) {
+    const value = $(id)?.value.trim();
+    if (value) fields[key] = value;
+  }
+  return fields;
+}
+function toggleBackend() {
+  const neo4j = currentBackend() === "neo4j";
+  $("#backend-label").textContent = neo4j ? "NEO4J" : "SQLITE";
+  $("#sqlite-picker").style.display = neo4j ? "none" : "";
+  for (const selector of ["#import-db", "#inspect-db", ".sample-row"]) {
+    const node = $(selector);
+    if (node) node.style.display = neo4j ? "none" : "";
+  }
+  if (neo4j) loadGraphSchema(); else loadSchema();
+}
+async function loadGraphSchema() {
+  const version = ++schemaVersion;
+  $("#schema").innerHTML = '<p class="muted small">Inspecting graph schema…</p>';
+  $("#source-caption").textContent = "Connecting to Neo4j…";
+  try {
+    const data = await jsonRequest("/api/neo4j/schema", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(neo4jSettings())});
+    if (version !== schemaVersion) return;
+    const labels = data.labels || [], rels = data.relationships || [];
+    $("#source-caption").textContent = `${labels.length} labels · ${rels.length} relationship types`;
+    $("#table-count").textContent = `${labels.length}`;
+    const subjects = labels.slice(0, 3).map(label => label.name).join(", ");
+    $("#prompt").placeholder = subjects ? `Ask about ${subjects}… (single label or one relationship hop)` : "Write your question about this graph…";
+    $("#schema").innerHTML = labels.map(label => `
+      <details class="schema-table"><summary><strong>${esc(label.name)}</strong><small>${label.properties.length} properties</small></summary>
+      <div class="columns">${label.properties.map(prop => `<div class="column"><b>${esc(prop.name)}${prop.mandatory ? " · req" : ""}</b><span>${esc((prop.types || []).join(" | "))}</span></div>`).join("")}</div></details>`).join("") +
+      (rels.length ? `<div class="schema-table" style="padding:.5rem .75rem"><strong style="font-size:.8rem">Relationships</strong>${rels.map(rel => `<div class="column"><b>${esc(rel.from)}</b><span>-[:${esc(rel.type)} ${rel.count}]→</span><b>${esc(rel.to)}</b></div>`).join("")}</div>` : "");
+  } catch (exc) {
+    $("#source-caption").textContent = "Neo4j not connected";
+    $("#schema").innerHTML = `<p class="muted small">${esc(exc.message)}. Set the connection under Settings → Neo4j, or the server's .env.</p>`;
+    $("#table-count").textContent = "—";
+  }
+}
+async function runCypher(prompt) {
+  running = true; calls = 0; completedSkills = 0; terminalReceived = false; runEvents = [];
+  resetResult(); setBusy(true); setPhase("inspect"); renderStats();
+  $("#export-trace").disabled = true;
+  $("#trace").innerHTML = "";
+  resetRunDetails();
+  activeDecision("Inspecting the graph schema");
+  $("#typed-program").open = true;
+  $("#program-status").textContent = "Resolving";
+  $("#program").innerHTML = '<div class="loading-lines" aria-label="Waiting for resolved semantics"><i></i><i></i><i></i></div>';
+  $("#output").innerHTML = '<div class="empty"><span class="empty-icon">⌁</span><strong>Your query is taking shape</strong><p>Follow the live query program and semantic decisions. Cypher runs only when the program is complete.</p></div>';
+  $("#row-count").textContent = "…";
+  $("#row-count-label").textContent = "rows";
+  $("#result-summary").textContent = `Neo4j · ${prompt}`;
+  $("#result-summary").title = prompt;
+  renderSQL(null);
+  startAt = performance.now();
+  timer = setInterval(() => { if (!terminalReceived) $("#elapsed").textContent = `${((performance.now()-startAt)/1000).toFixed(1)}s`; },100);
+  notice("Inspecting the graph schema (apoc.meta.schema)", "running");
+  try {
+    const answer = await jsonRequest("/api/cypher", {method:"POST", headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({question:prompt, ...neo4jSettings()}), cache:"no-store"});
+    setPhase("resolve");
+    for (const entry of answer.trace || []) {
+      handleEvent({kind:"skill", name: entry.purpose || "bounded decision",
+        selected: entry.selected, usage: {input_tokens: entry.input_tokens, output_tokens: entry.output_tokens, elapsed_ms: entry.elapsed_ms}});
+    }
+    if (answer.program) handleEvent({kind:"program", program: answer.program});
+    if (answer.sql) handleEvent({kind:"compiled", program: answer.program, sql: answer.sql, params: answer.params});
+    handleEvent({kind:"result", result: {
+      supported: answer.supported, columns: answer.columns || [], rows: answer.rows || [],
+      total_rows: answer.total_rows, truncated: false, program: answer.program,
+      sql: answer.sql, params: answer.params, stats: answer.stats}, elapsed_ms: performance.now() - startAt});
+    if (!answer.supported && answer.reason) {
+      $("#output").innerHTML = `<p class="warning">Refused: ${esc(answer.reason)}</p>`;
+      notice(`Refused · ${answer.reason}`, "error");
+    }
+  } catch (exc) { terminalReceived = true; error(exc.message); }
+  finally { running = false; clearInterval(timer); setBusy(false); activeDecision("Recorded decisions / most recent first"); }
+}
 async function loadConnection() {
   const data = await jsonRequest("/api/connection");
   connectionPending = false;
@@ -721,6 +803,7 @@ async function run() {
   if (connectionPending) return notice("Save connection settings before running", "error");
   const prompt = $("#prompt").value.trim();
   if (prompt.length < 3) { $("#prompt").focus(); return notice("Enter a request with at least three characters.", "error"); }
+  if (currentBackend() === "neo4j") return runCypher(prompt);
   running = true; calls = 0; completedSkills = 0; terminalReceived = false; runEvents = [];
   resetResult(); setBusy(true); setPhase("inspect"); renderStats();
   $("#export-trace").disabled = true;
@@ -887,5 +970,20 @@ document.addEventListener("DOMContentLoaded", async () => {
   });
   $("#confirm-commit").addEventListener("click", commit);
   for (const button of document.querySelectorAll(".sample")) button.addEventListener("click", async () => { if (running) return; try { await loadDatabases(button.dataset.db); $("#prompt").value = button.dataset.prompt; $("#prompt").dispatchEvent(new Event("input")); $("#prompt").focus(); } catch (exc) { error(exc.message); } });
+  // Neo4j backend: browser-stored settings, backend toggle, restore choice.
+  for (const [key, id] of [["uri","neo4j-uri"],["username","neo4j-user"],["password","neo4j-password"],["database","neo4j-database"]]) {
+    $(`#${id}`).value = localStorage.getItem(`intentsql-neo4j-${key}`) || "";
+  }
+  $("#save-neo4j").addEventListener("click", () => {
+    for (const [key, id] of [["uri","neo4j-uri"],["username","neo4j-user"],["password","neo4j-password"],["database","neo4j-database"]]) {
+      const value = $(`#${id}`).value.trim();
+      value ? localStorage.setItem(`intentsql-neo4j-${key}`, value) : localStorage.removeItem(`intentsql-neo4j-${key}`);
+    }
+    $("#neo4j-feedback").textContent = "Neo4j settings saved in this browser.";
+    if (currentBackend() === "neo4j") loadGraphSchema();
+  });
+  $("#backend").value = localStorage.getItem("intentsql-backend") || "sqlite";
+  $("#backend").addEventListener("change", () => { localStorage.setItem("intentsql-backend", currentBackend()); clearQuery(); toggleBackend(); });
+  toggleBackend();
   try { await Promise.all([loadDatabases(),loadConnection()]); } catch (exc) { error(exc.message); }
 });
